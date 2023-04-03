@@ -1,0 +1,3 @@
+﻿<Project>
+  <Import Project="..\build\ItransitionTask6.props" />
+</Project>

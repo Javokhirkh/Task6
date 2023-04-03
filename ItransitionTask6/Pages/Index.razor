@@ -1,0 +1,279 @@
+﻿@page "/"
+
+@inject ApplicationDbContext ApplicationDbContext
+@inject NavigationManager NavigationManager
+@inject ISnackbar Snackbar
+@inject IJSRuntime JSRuntime
+
+@using Humanizer
+@using Microsoft.AspNetCore.WebUtilities
+@implements IAsyncDisposable
+
+<PageTitle>Chat</PageTitle>
+
+<MudContainer>
+    <MudPaper Elevation="0">
+        @if (Sender== null)
+        {
+            <div class="d-flex align-items-center">
+                <MudTextField Required="true" Margin="Margin.Dense" Class="flex-grow-1" T="string" @bind-Value="_senderName" Label="Enter Name" Variant="Variant.Outlined"></MudTextField>
+                <div>
+                    <MudButton Class="ml-3" OnClick="ConnectSender" Variant="Variant.Filled" Color="Color.Primary">Connect</MudButton>
+                </div>
+            </div>
+        }
+        else
+        {
+            <MudAlert Severity="Severity.Info">You are connected as <span>@_senderName</span></MudAlert>
+            
+            @if (Receiver == null)
+            {
+                <div class="d-flex align-items-center mt-4">
+                    <MudAutocomplete T="string" Required="true" Label="Enter Receiver Name" @bind-Value="_receiverName" SearchFunc="@SearchReceiver"
+                                     ResetValueOnEmptyText="false" Margin="Margin.Dense" Class="flex-grow-1"
+                                     CoerceText="true" CoerceValue="false" Variant="Variant.Outlined"
+                                     AdornmentIcon="@Icons.Material.Filled.Search" AdornmentColor="Color.Primary" />
+                    <div>
+                        <MudButton OnClick="SelectReceiver" Class="ml-3" Variant="Variant.Filled" Color="Color.Primary">Select</MudButton>
+                    </div>
+                </div>    
+            }
+            else
+            {
+                <MudAlert Class="mt-3" Severity="Severity.Success">Send message to <span>@_receiverName</span></MudAlert>
+                
+                <MudPaper Class="p-3 mt-3" Elevation="25" >
+                    
+                    <div @ref="messagesContainer" style="height: 50vh; overflow-y: auto">
+                        <div>
+                            @foreach(var message in Messages)
+                            {
+                                <div class="@($"d-flex flex-column justify-content-end  m-2 {((message.SenderId == Sender.Id) ? "align-items-end" : "align-items-start")}")">
+                                    <MudAlert Elevation="25" NoIcon="true" 
+                                              Severity="message.SenderId == Sender.Id ? Severity.Info : Severity.Success"
+                                              Style="max-width: 70%;" Class="">
+                                        <div class="d-flex justify-content-between">
+                                            <MudText Typo="Typo.subtitle2" style="">@message.Title</MudText>
+                                        </div>
+                                        <div class="d-flex justify-content-between">
+                                            <MudText Typo="Typo.subtitle2">@message.Body</MudText>
+                                        </div>
+                                    </MudAlert>
+                                    <MudText Class="mt-1" Typo="Typo.caption">@message.SentTime.Humanize()</MudText>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                    
+                    <MudPaper Class="mt-4" Elevation="0">
+                        <MudTextField T="string" @bind-Value="_messageTitle" Variant="Variant.Outlined" Margin="Margin.Dense" Label="Title" Required="true" />
+                        <MudTextField T="string" @bind-Value="_messageText" Variant="Variant.Outlined" Margin="Margin.Dense" Label="Message" Lines="5" Class="mt-3" Required="true"/>
+                        <div class="d-flex justify-content-end">
+                            <MudButton OnClick="SendMessage" Color="Color.Primary" Variant="Variant.Filled" Class="mt-3" StartIcon="@Icons.Material.Filled.Send">Send</MudButton>
+                        </div>
+                    </MudPaper>
+                </MudPaper>
+            }
+        }
+    </MudPaper>
+</MudContainer>
+
+
+@code{
+
+    private string _senderName;
+    private User Sender;
+    
+    private string _receiverName;
+    private User Receiver;
+    
+    private string _messageTitle;
+    private string _messageText;
+    
+    private List<Message> Messages = new List<Message>();
+    
+    private string _hubUrl;
+    private HubConnection _hubConnection;
+
+    private ElementReference messagesContainer;
+
+    private async Task GetMessages()
+    {
+        Messages = await ApplicationDbContext.Messages.AsNoTracking()
+            .Include(x => x.Sender)
+            .Include(x => x.Receiver)
+            .Where(x =>
+                x.SenderId == Sender.Id && x.ReceiverId == Receiver.Id || 
+                x.SenderId == Receiver.Id && x.ReceiverId == Sender.Id)
+            .OrderBy(x => x.SentTime)
+            .ToListAsync();
+        
+        StateHasChanged();
+
+        await ScrollToBottom();
+    }
+    
+    private async Task ScrollToBottom()
+    {
+        await JSRuntime.InvokeVoidAsync("scrollToBottom", messagesContainer);
+    }
+
+    private async Task GetNewMessages()
+    {
+        var lastMessage = Messages.LastOrDefault();
+        
+        if(lastMessage == null)
+            return;
+
+        var newMessages = await ApplicationDbContext.Messages.AsNoTracking()
+            .Include(x => x.Sender)
+            .Include(x => x.Receiver)
+            .Where(x =>
+                x.SenderId == Sender.Id && x.ReceiverId == Receiver.Id ||
+                x.SenderId == Receiver.Id && x.ReceiverId == Sender.Id)
+            .Where(x => x.SentTime > lastMessage.SentTime)
+            .OrderBy(x => x.SentTime)
+            .ToListAsync();
+
+        Messages.AddRange(newMessages);
+        
+        StateHasChanged();
+        
+        await ScrollToBottom();
+    }
+
+    private async Task ConnectSender()
+    {
+        if (string.IsNullOrWhiteSpace(_senderName))
+        {
+            Snackbar.Add("Enter your name", Severity.Error);
+            return;
+        }
+        
+        Sender = await ApplicationDbContext.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Name == _senderName);
+        if (Sender == null)
+        {
+            Sender = new User
+            {
+                Name = _senderName
+            };
+            await ApplicationDbContext.Users.AddAsync(Sender);
+            await ApplicationDbContext.SaveChangesAsync();
+        }
+    }
+
+    private async Task SelectReceiver()
+    {
+        if (string.IsNullOrWhiteSpace(_receiverName))
+        {
+            Snackbar.Add("Enter correct receiver name.", Severity.Error);
+            return;
+        }
+        
+        Receiver = await ApplicationDbContext.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Name == _receiverName);
+        if (Receiver == null)
+        {
+            Snackbar.Add("User not found", Severity.Error);
+            return;
+        }
+
+        await ConnectToHub();
+        
+        await GetMessages();
+    }
+
+    private async Task ConnectToHub()
+    {
+        var baseUrl = NavigationManager.BaseUri;
+        _hubUrl = QueryHelpers.AddQueryString(baseUrl.TrimEnd('/') + $"/chatHub", new Dictionary<string, string>()
+        {
+            ["username"] = Sender.Name
+        });
+
+        Console.WriteLine(_hubUrl);
+
+        try
+        {
+            _hubConnection = new HubConnectionBuilder()
+                .WithUrl(_hubUrl)
+                .Build();
+
+            _hubConnection.On<string, string>("ReceivePrivateMessage", (user, message) =>
+            {
+                Snackbar.Add("Received new message", Severity.Success);
+                InvokeAsync(async () =>
+                {
+                    await GetNewMessages();
+                });
+            });
+        
+            await _hubConnection.StartAsync();
+        }
+        catch (Exception e)
+        {
+            Snackbar.Add("Error connecting to hub: " + e.Message, Severity.Error);
+        }
+    }
+
+    private async  Task SendMessage()
+    {
+        if (string.IsNullOrWhiteSpace(_messageTitle))
+        {
+            Snackbar.Add("Enter message title", Severity.Error);
+            return;
+        }
+        
+        if (string.IsNullOrWhiteSpace(_messageText))
+        {
+            Snackbar.Add("Enter message text", Severity.Error);
+            return;
+        }
+        
+        var message = new Message
+        {
+            Title = _messageTitle,
+            Body = _messageText,
+            SenderId = Sender.Id,
+            ReceiverId = Receiver.Id,
+            SentTime = DateTimeOffset.Now
+        };
+        
+        await ApplicationDbContext.Messages.AddAsync(message);
+        await ApplicationDbContext.SaveChangesAsync();
+        
+        _messageText = string.Empty;
+        _messageTitle = string.Empty;
+        
+        await _hubConnection.SendAsync("SendPrivateMessage", Sender.Name, "Message sent", Receiver.Name);
+
+        await GetNewMessages();
+        
+        Snackbar.Add("Message sent", Severity.Success);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hubConnection != null)
+        {
+            await _hubConnection.StopAsync();
+            await _hubConnection.DisposeAsync();
+        }
+    }
+
+    private async Task<IEnumerable<string>> SearchReceiver(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return await ApplicationDbContext.Users.AsNoTracking()
+                .Select(x => x.Name)
+                .ToListAsync();
+        
+        var users = await ApplicationDbContext.Users.AsNoTracking()
+            .Where(x => EF.Functions.Like(x.Name, $"%{value}%"))
+            .Select(x => x.Name)
+            .ToListAsync();
+        
+        return users;
+    }
+
+}
+
